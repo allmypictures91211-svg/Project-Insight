@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Lint configuration for Project Insight.
+
+    Philosophy:
+    - All checks are enabled by default (no blanket disables).
+    - Suppressions are scoped to specific issues with a documented reason.
+    - Third-party library warnings are suppressed at the library path level,
+      not globally, so app code is still fully checked.
+    - This file is NOT a baseline (which hides existing issues) — it is a
+      permanent configuration of intentional exceptions.
+-->
+<lint>
+    <!-- Treat all lint issues as errors in CI — no silent warnings. -->
+    <issue id="all" severity="error" />
+
+    <!-- ── Intentional exceptions ──────────────────────────────────────────── -->
+
+    <!-- ObsoleteSdkInt: minSdk=26; some Compose internals still have
+         Build.VERSION.SDK_INT >= 21 guards. Suppress only in generated code. -->
+    <issue id="ObsoleteSdkInt" severity="warning" />
+
+    <!-- GradleDependency: version update warnings are informational, not errors.
+         Dependency updates are managed deliberately via the ext version catalog. -->
+    <issue id="GradleDependency" severity="warning" />
+
+    <!-- NewerVersionAvailable: same rationale as GradleDependency. -->
+    <issue id="NewerVersionAvailable" severity="warning" />
+
+    <!-- IconMissingDensityFolder: splash PNGs are present for all required
+         densities; land-* variants are legacy Capacitor assets. -->
+    <issue id="IconMissingDensityFolder" severity="warning" />
+
+    <!-- UnusedResources: the layout/activity_main.xml is intentionally empty
+         (Compose renders directly into the window). -->
+    <issue id="UnusedResources">
+        <ignore path="**/layout/activity_main.xml" />
+    </issue>
+
+    <!-- VectorPath: the ic_launcher_background.xml grid lines are intentional
+         decorative elements, not errors. -->
+    <issue id="VectorPath" severity="warning" />
+
+    <!-- ── Accessibility — downgrade to warning during initial development.
+         All cd_* content descriptions are defined; wire them to composables
+         before 1.0 release. ──────────────────────────────────────────────── -->
+    <issue id="ContentDescription" severity="warning" />
+
+</lint>

@@ -1,0 +1,356 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+    id 'org.jetbrains.kotlin.plugin.compose'
+    id 'com.google.devtools.ksp'
+    id 'com.google.dagger.hilt.android'
+    id 'com.google.gms.google-services'
+    id 'com.google.firebase.crashlytics'
+    id 'androidx.room'
+}
+
+// ── Version catalog ───────────────────────────────────────────────────────────
+// All dependency versions are declared here for a single point of truth.
+ext {
+    lifecycle_version   = '2.9.0'
+    navigation_version  = '2.8.9'
+    media3_version      = '1.6.1'
+    room_version        = '2.7.1'
+    work_version        = '2.10.1'
+    coroutines_version  = '1.10.2'
+    coil_version        = '3.2.0'
+    hilt_version        = '2.56.2'
+    hilt_androidx_version = '1.2.0'
+    firebase_bom_version  = '33.14.0'
+}
+
+// ── Version derivation ────────────────────────────────────────────────────────
+// versionCode: CI pipeline IID (always > 0, monotonically increasing).
+//   Local builds fall back to 1. The coerceAtLeast(1) guard prevents a
+//   zero or negative versionCode which the Play Store rejects.
+// versionName: git tag stripped of the leading "v" (e.g. v1.2.3 → "1.2.3").
+//   Local builds use "0.0.0-dev".
+def ciPipelineIid      = Math.max(System.getenv("CI_PIPELINE_IID")?.toInteger() ?: 1, 1)
+def gitTag             = System.getenv("CI_COMMIT_TAG")
+def derivedVersionName = gitTag?.replaceFirst(/^v/, '') ?: "0.0.0-dev"
+
+// ── Signing credential resolution ────────────────────────────────────────────
+// Priority order:
+//   1. Gradle project properties (-P flags) — used by CI via assembleRelease args
+//   2. Environment variables — used for local developer builds
+//
+// CI injects these via -P flags (see .gitlab-ci.yml):
+//   RELEASE_STORE_FILE, RELEASE_STORE_PASSWORD, RELEASE_KEY_ALIAS, RELEASE_KEY_PASSWORD
+//
+// The result is null — never an empty string — when neither source provides a value.
+def resolveSigningProp = { String propName, String envName ->
+    def v = project.findProperty(propName) ?: System.getenv(envName)
+    return (v != null && !v.toString().trim().isEmpty()) ? v.toString().trim() : null
+}
+
+def ksFile   = resolveSigningProp('RELEASE_STORE_FILE',     'RELEASE_STORE_FILE')
+def ksPwd    = resolveSigningProp('RELEASE_STORE_PASSWORD', 'RELEASE_STORE_PASSWORD')
+def ksAlias  = resolveSigningProp('RELEASE_KEY_ALIAS',      'RELEASE_KEY_ALIAS')
+def ksKeyPwd = resolveSigningProp('RELEASE_KEY_PASSWORD',   'RELEASE_KEY_PASSWORD')
+def hasSigningCredentials = [ksFile, ksPwd, ksAlias, ksKeyPwd].every { it != null }
+
+// Fail loudly — but only when a release assembly or bundle was actually requested.
+// We check for tasks whose name ends with 'Release' (e.g. assembleRelease,
+// bundleRelease, packageRelease) to avoid false positives on tasks like
+// 'generateReleaseSources' that are pulled in transitively by debug builds.
+gradle.taskGraph.whenReady { graph ->
+    def requestedRelease = graph.allTasks.any { task ->
+        task.name ==~ /(?i).*(assemble|bundle|package)Release.*/
+    }
+    if (requestedRelease && !hasSigningCredentials) {
+        throw new GradleException(
+            "Release signing credentials are missing. Provide all four:\n" +
+            "  -PRELEASE_STORE_FILE=<path>      (or env RELEASE_STORE_FILE)\n" +
+            "  -PRELEASE_STORE_PASSWORD=<pw>    (or env RELEASE_STORE_PASSWORD)\n" +
+            "  -PRELEASE_KEY_ALIAS=<alias>      (or env RELEASE_KEY_ALIAS)\n" +
+            "  -PRELEASE_KEY_PASSWORD=<pw>      (or env RELEASE_KEY_PASSWORD)"
+        )
+    }
+}
+
+android {
+    namespace = "app.insighteditor"
+    compileSdk = 36
+    ndkVersion = "27.2.12479018"
+
+    defaultConfig {
+        applicationId "app.insighteditor"
+        minSdk 26
+        targetSdk 36
+        versionCode ciPipelineIid
+        versionName derivedVersionName
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+
+        ndk {
+            abiFilters "arm64-v8a", "x86_64"
+        }
+
+        externalNativeBuild {
+            cmake {
+                // -ffast-math removed: it violates IEEE 754 and produces
+                // non-deterministic results in colour-grading and audio
+                // processing.  -O3 alone is the correct production flag.
+                cppFlags "-std=c++17 -O3"
+                arguments "-DANDROID_STL=c++_shared",
+                          "-DANDROID_PLATFORM=android-26"
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
+
+    buildFeatures {
+        compose true
+        buildConfig true
+    }
+
+    // ── Signing configs ───────────────────────────────────────────────────────
+    // The release config is always declared as a named block so that
+    // signingConfigs.release is a valid reference at configuration time.
+    // Credentials are populated only when available; the taskGraph guard above
+    // catches any attempt to run a release task without them.
+    //
+    // IMPORTANT: Do NOT use an `if` statement to conditionally define a named
+    // config inside signingConfigs {}. In Groovy DSL, the block is a
+    // NamedDomainObjectContainer — a conditional `if` does not create a named
+    // entry; it silently falls through, leaving signingConfigs.release
+    // undefined and causing AGP to fall back to the debug signing config.
+    signingConfigs {
+        release {
+            if (hasSigningCredentials) {
+                storeFile     file(ksFile)
+                storePassword ksPwd
+                keyAlias      ksAlias
+                keyPassword   ksKeyPwd
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            // No applicationIdSuffix — debug and release share the same Firebase
+            // project (google-services.json has a single app.insighteditor entry).
+            // A suffix would require a second Firebase app registration and a
+            // separate google-services.json client block.
+            debuggable true
+            jniDebuggable true
+            minifyEnabled false
+            shrinkResources false
+        }
+        release {
+            // Explicitly distinct from debug — never inherits debug signing.
+            debuggable false
+            jniDebuggable false
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // signingConfig is always assigned; credentials are validated by
+            // the taskGraph guard before the task executes.
+            signingConfig signingConfigs.release
+            // Retain unstripped .so files for Play Console crash symbolication.
+            // AGP copies them to intermediates before stripping; this setting
+            // packages the symbol table in the AAB/APK upload.
+            ndk {
+                debugSymbolLevel 'FULL'
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    packaging {
+        resources {
+            excludes += '/META-INF/{AL2.0,LGPL2.1}'
+        }
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
+
+    splits {
+        abi {
+            // Disabled — ABI splits rename the output APK (app-arm64-v8a-debug.apk)
+            // which breaks the CI artifact path. Use abiFilters in defaultConfig instead.
+            enable false
+        }
+    }
+
+    sourceSets {
+        main {
+            java.srcDirs = ['src/main/kotlin']
+        }
+        test {
+            java.srcDirs = ['src/test/kotlin']
+        }
+        androidTest {
+            java.srcDirs = ['src/androidTest/kotlin']
+        }
+    }
+
+    testOptions {
+        unitTests {
+            includeAndroidResources = true
+        }
+    }
+
+    // ── Firebase Crashlytics ──────────────────────────────────────────────────
+    // Upload NDK symbols so C++ engine crashes are symbolicated in the console.
+    // nativeSymbolUploadEnabled requires the crashlytics gradle plugin.
+    firebaseCrashlytics {
+        nativeSymbolUploadEnabled true
+        unstrippedNativeLibsDir 'build/intermediates/merged_native_libs'
+    }
+
+    // ── Room schema export ────────────────────────────────────────────────────
+    // Exports the Room schema JSON to schemas/ for migration testing.
+    // The androidx.room plugin reads this block; KSP no longer needs the
+    // room.schemaLocation annotation processor argument.
+    room {
+        schemaDirectory "$projectDir/schemas"
+    }
+
+    lint {
+        // abortOnError defaults to true — never override it; fatal findings
+        // must block the build.
+        checkReleaseBuilds true
+
+        // Per-issue severity overrides live in app/lint.xml so they are
+        // version-controlled and visible without opening build.gradle.
+        lintConfig file('lint.xml')
+
+        // Treat these as errors regardless of lint.xml — they are
+        // Play Store policy violations that must never ship silently.
+        error 'NewApi', 'ProtectedPermissions', 'MissingPermission',
+              'HardcodedText', 'SetTextI18n'
+
+        // Produce an HTML report for CI artifact upload.
+        htmlReport true
+        htmlOutput file("${project.buildDir}/reports/lint/lint-results.html")
+        // Produce a SARIF report for GitLab Security Dashboard integration.
+        sarifReport true
+        sarifOutput file("${project.buildDir}/reports/lint/lint-results.sarif")
+    }
+}
+
+dependencies {
+    // Compose BOM — single version source for all Compose artifacts
+    def composeBom = platform('androidx.compose:compose-bom:2026.05.01')
+    implementation composeBom
+    androidTestImplementation composeBom
+
+    // Compose UI
+    implementation 'androidx.compose.ui:ui'
+    implementation 'androidx.compose.ui:ui-graphics'
+    implementation 'androidx.compose.ui:ui-tooling-preview'
+    implementation 'androidx.compose.material3:material3'
+    implementation 'androidx.compose.material:material-icons-extended'
+    implementation 'androidx.compose.foundation:foundation'
+    implementation 'androidx.compose.animation:animation'
+    debugImplementation 'androidx.compose.ui:ui-tooling'
+    debugImplementation 'androidx.compose.ui:ui-test-manifest'
+
+    // Activity + Lifecycle
+    implementation 'androidx.activity:activity-compose:1.10.1'
+    implementation "androidx.lifecycle:lifecycle-runtime-ktx:${lifecycle_version}"
+    implementation "androidx.lifecycle:lifecycle-viewmodel-compose:${lifecycle_version}"
+    implementation "androidx.lifecycle:lifecycle-runtime-compose:${lifecycle_version}"
+
+    // Navigation
+    implementation "androidx.navigation:navigation-compose:${navigation_version}"
+
+    // Core
+    implementation 'androidx.core:core-splashscreen:1.0.1'
+
+    // ExoPlayer / Media3
+    implementation "androidx.media3:media3-exoplayer:${media3_version}"
+    implementation "androidx.media3:media3-ui:${media3_version}"
+    implementation "androidx.media3:media3-common:${media3_version}"
+    implementation "androidx.media3:media3-transformer:${media3_version}"
+    implementation "androidx.media3:media3-effect:${media3_version}"
+    implementation "androidx.media3:media3-session:${media3_version}"
+
+    // WorkManager
+    implementation "androidx.work:work-runtime-ktx:${work_version}"
+
+    // Coroutines
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:${coroutines_version}"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:${coroutines_version}"
+
+    // Coil (thumbnails)
+    implementation "io.coil-kt.coil3:coil-compose:${coil_version}"
+    implementation "io.coil-kt.coil3:coil-video:${coil_version}"
+
+    // DataStore
+    implementation 'androidx.datastore:datastore-preferences:1.1.4'
+
+    // Room
+    implementation "androidx.room:room-runtime:${room_version}"
+    implementation "androidx.room:room-ktx:${room_version}"
+    ksp "androidx.room:room-compiler:${room_version}"
+
+    // ML Kit
+    implementation 'com.google.mlkit:image-labeling:17.0.9'
+
+    // Accompanist
+    implementation 'com.google.accompanist:accompanist-permissions:0.37.3'
+
+    // Gson
+    implementation 'com.google.code.gson:gson:2.13.1'
+
+    // Startup (WorkManager initializer)
+    implementation 'androidx.startup:startup-runtime:1.2.0'
+
+    // AppCompat — required for Theme.AppCompat.DayNight.NoActionBar in styles.xml
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+
+    // Core — notification and compat APIs for ExportWorker
+    implementation 'androidx.core:core:1.16.0'
+
+    // ── Hilt ─────────────────────────────────────────────────────────────────
+    implementation "com.google.dagger:hilt-android:${hilt_version}"
+    ksp "com.google.dagger:hilt-android-compiler:${hilt_version}"
+    // Hilt + WorkManager bridge
+    implementation "androidx.hilt:hilt-work:${hilt_androidx_version}"
+    ksp "androidx.hilt:hilt-compiler:${hilt_androidx_version}"
+    // Hilt + Navigation Compose
+    implementation "androidx.hilt:hilt-navigation-compose:${hilt_androidx_version}"
+
+    // ── Firebase BOM (single version source for all Firebase artifacts) ───────
+    def firebaseBom = platform("com.google.firebase:firebase-bom:${firebase_bom_version}")
+    implementation firebaseBom
+    // Crashlytics — crash reporting + ANR detection
+    implementation 'com.google.firebase:firebase-crashlytics-ktx'
+    // NDK crash symbolication (C++ engine stack traces)
+    implementation 'com.google.firebase:firebase-crashlytics-ndk'
+    // Analytics — opt-in, disabled until user consents
+    implementation 'com.google.firebase:firebase-analytics-ktx'
+
+    // Testing
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation "org.jetbrains.kotlinx:kotlinx-coroutines-test:${coroutines_version}"
+    testImplementation 'org.mockito:mockito-core:5.14.2'
+    testImplementation 'org.mockito.kotlin:mockito-kotlin:5.4.0'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.6.1'
+    androidTestImplementation 'androidx.compose.ui:ui-test-junit4'
+    androidTestImplementation "com.google.dagger:hilt-android-testing:${hilt_version}"
+    kspAndroidTest "com.google.dagger:hilt-android-compiler:${hilt_version}"
+}
