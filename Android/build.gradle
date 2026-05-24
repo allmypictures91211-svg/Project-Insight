@@ -1,0 +1,22 @@
+// Top-level build file. Plugin versions are declared here; repositories are
+// managed in settings.gradle via dependencyResolutionManagement.
+
+plugins {
+    id 'com.android.application'             version '8.9.3'  apply false
+    id 'com.android.library'                 version '8.9.3'  apply false
+    id 'org.jetbrains.kotlin.android'        version '2.1.21' apply false
+    id 'org.jetbrains.kotlin.plugin.compose' version '2.1.21' apply false
+    id 'com.google.devtools.ksp'             version '2.1.21-2.0.2' apply false
+    // Hilt — must match hilt-android runtime version below
+    id 'com.google.dagger.hilt.android'      version '2.56.2' apply false
+    // Firebase — google-services processes google-services.json
+    id 'com.google.gms.google-services'      version '4.4.2'  apply false
+    // Crashlytics Gradle plugin — uploads mapping files and NDK symbols
+    id 'com.google.firebase.crashlytics'     version '3.0.3'  apply false
+    // Room Gradle plugin — provides room.schemaLocation for schema export
+    id 'androidx.room'                       version '2.7.1'  apply false
+}
+
+tasks.register('clean', Delete) {
+    delete rootProject.buildDir
+}
