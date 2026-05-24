@@ -1,0 +1,249 @@
+# Pure native Android build — no Node/Capacitor/web layer.
+# JDK 21 required by AGP 8.x and the NDK C++ toolchain.
+image: eclipse-temurin:21-jdk-jammy
+
+# Prevent duplicate pipelines: skip branch pipelines when an MR pipeline
+# already exists for the same branch, and skip MR pipelines on the default
+# branch (where only push pipelines run).
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+
+stages:
+  - build
+  - test
+  - release
+
+variables:
+  ANDROID_SDK_ROOT: "/sdk"
+  ANDROID_HOME:     "/sdk"
+  GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle-cache"
+  # Disable Gradle daemon — each CI job gets a fresh JVM.
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+
+# ── Shared SDK bootstrap ──────────────────────────────────────────────────────
+# Referenced by every job via YAML anchors to avoid duplication.
+.android_setup: &android_setup
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y --no-install-recommends wget unzip ca-certificates git
+    - mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
+    - wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmdline-tools.zip
+    - unzip -q /tmp/cmdline-tools.zip -d $ANDROID_SDK_ROOT/cmdline-tools
+    - mv $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools/latest
+    - rm /tmp/cmdline-tools.zip
+    - export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+    - export JAVA_HOME="$(dirname $(dirname $(readlink -f $(which java))))"
+    - yes | sdkmanager --licenses > /dev/null 2>&1 || true
+    - sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+    - echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+
+# ── Debug APK (every push) ────────────────────────────────────────────────────
+build_apk:
+  stage: build
+  interruptible: true
+  <<: *android_setup
+
+  cache:
+    key: "gradle-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .gradle-cache/
+
+  script:
+    - export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+    - export JAVA_HOME="$(dirname $(dirname $(readlink -f $(which java))))"
+    - cd android
+    - chmod +x gradlew
+    - ./gradlew assembleDebug --stacktrace
+    - echo "=== APK output ===" && find app/build/outputs/apk/debug -name "*.apk"
+
+  artifacts:
+    name: "project-insight-debug-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - android/app/build/outputs/apk/debug/*.apk
+    when: always
+    expire_in: 14 days
+
+# ── Unit tests (every push) ───────────────────────────────────────────────────
+unit_tests:
+  stage: test
+  interruptible: true
+  <<: *android_setup
+  needs: [build_apk]
+
+  cache:
+    key: "gradle-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .gradle-cache/
+
+  script:
+    - export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+    - export JAVA_HOME="$(dirname $(dirname $(readlink -f $(which java))))"
+    - cd android
+    - chmod +x gradlew
+    - ./gradlew test --stacktrace
+
+  artifacts:
+    name: "test-results-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - android/app/build/reports/tests/
+    reports:
+      junit: android/app/build/test-results/**/TEST-*.xml
+    when: always
+    expire_in: 14 days
+
+# ── Lint (every push) ─────────────────────────────────────────────────────────
+lint:
+  stage: test
+  interruptible: true
+  <<: *android_setup
+  needs: [build_apk]
+
+  cache:
+    key: "gradle-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .gradle-cache/
+
+  script:
+    - export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+    - export JAVA_HOME="$(dirname $(dirname $(readlink -f $(which java))))"
+    - cd android
+    - chmod +x gradlew
+    - ./gradlew lintRelease --stacktrace
+
+  artifacts:
+    name: "lint-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - android/app/build/reports/lint/
+    when: always
+    expire_in: 14 days
+
+# ── Signed Release APK + AAB (version tags only) ──────────────────────────────
+# Required CI/CD variables (masked, protected):
+#   RELEASE_KEYSTORE_BASE64  — base64-encoded .jks keystore
+#   RELEASE_STORE_PASSWORD   — keystore password
+#   RELEASE_KEY_ALIAS        — key alias
+#   RELEASE_KEY_PASSWORD     — key password
+#
+# Legacy variable names (KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS,
+# KEY_PASSWORD) are also accepted as fallbacks during migration.
+release_apk:
+  stage: release
+  <<: *android_setup
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/'
+
+  cache:
+    key: "gradle-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .gradle-cache/
+
+  script:
+    - export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+    - export JAVA_HOME="$(dirname $(dirname $(readlink -f $(which java))))"
+
+    # ── Decode keystore ───────────────────────────────────────────────────────
+    - |
+      KS_B64="${RELEASE_KEYSTORE_BASE64:-$KEYSTORE_BASE64}"
+      if [ -z "$KS_B64" ]; then
+        echo "ERROR: Neither RELEASE_KEYSTORE_BASE64 nor KEYSTORE_BASE64 is set"
+        exit 1
+      fi
+      echo "$KS_B64" | base64 -d > android/app/release.keystore
+    - KEYSTORE_ABS_PATH="$(pwd)/android/app/release.keystore"
+
+    # Resolve signing credentials — prefer RELEASE_* names, fall back to legacy.
+    - STORE_PWD="${RELEASE_STORE_PASSWORD:-$KEYSTORE_PASSWORD}"
+    - KEY_ALIAS_VAL="${RELEASE_KEY_ALIAS:-$KEY_ALIAS}"
+    - KEY_PWD="${RELEASE_KEY_PASSWORD:-$KEY_PASSWORD}"
+
+    # ── Build APK + AAB ───────────────────────────────────────────────────────
+    - cd android
+    - chmod +x gradlew
+    - >
+      ./gradlew clean assembleRelease bundleRelease --stacktrace
+      -PRELEASE_STORE_FILE="$KEYSTORE_ABS_PATH"
+      -PRELEASE_STORE_PASSWORD="$STORE_PWD"
+      -PRELEASE_KEY_ALIAS="$KEY_ALIAS_VAL"
+      -PRELEASE_KEY_PASSWORD="$KEY_PWD"
+
+    # ── Verify APK signature ──────────────────────────────────────────────────
+    - APK=$(find app/build/outputs/apk/release -name "*.apk" | grep -v unsigned | head -1)
+    - |
+      if [ -z "$APK" ]; then
+        echo "ERROR: No signed APK found"
+        find app/build/outputs/apk/ -name "*.apk" || true
+        exit 1
+      fi
+    - |
+      if echo "$APK" | grep -qi "debug"; then
+        echo "ERROR: APK filename contains 'debug' — release variant was not built"
+        exit 1
+      fi
+    - BUILD_TOOLS="$ANDROID_SDK_ROOT/build-tools/36.0.0"
+    - $BUILD_TOOLS/apksigner verify --verbose "$APK" 2>&1 | tee /tmp/apksigner.txt
+    - |
+      if ! grep -qE "Verified using v[23] scheme.*: true" /tmp/apksigner.txt; then
+        echo "ERROR: APK v2/v3 signature verification failed"
+        cat /tmp/apksigner.txt
+        exit 1
+      fi
+    - echo "=== Signature verification PASSED ==="
+    - AAB=$(find app/build/outputs/bundle/release -name "*.aab" | head -1)
+    - 'echo "=== APK: $APK ===" && echo "=== AAB: $AAB ==="'
+
+    # ── Create GitLab Release ─────────────────────────────────────────────────
+    - cd ..
+    - |
+      if ! command -v release-cli &>/dev/null; then
+        wget -q "https://gitlab.com/api/v4/projects/gitlab-org%2Frelease-cli/packages/generic/release-cli/latest/release-cli-linux-amd64" \
+          -O /usr/local/bin/release-cli
+        chmod +x /usr/local/bin/release-cli
+      fi
+    - |
+      APK_NAME=$(basename "$APK")
+      AAB_NAME=$(basename "$AAB")
+      release-cli create \
+        --name "Release $CI_COMMIT_TAG" \
+        --tag-name "$CI_COMMIT_TAG" \
+        --description "Signed release build — APK and AAB for $CI_COMMIT_TAG" \
+        --assets-link "{\"name\":\"${APK_NAME}\",\"url\":\"${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/android/app/build/outputs/apk/release/${APK_NAME}\"}" \
+        --assets-link "{\"name\":\"${AAB_NAME}\",\"url\":\"${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/android/app/build/outputs/bundle/release/${AAB_NAME}\"}"
+
+  after_script:
+    # Always remove the keystore — must not persist between jobs.
+    - rm -f android/app/release.keystore
+
+  artifacts:
+    name: "project-insight-release-$CI_COMMIT_TAG"
+    paths:
+      - android/app/build/outputs/apk/release/*.apk
+      - android/app/build/outputs/bundle/release/*.aab
+      - android/app/build/outputs/mapping/release/mapping.txt
+    when: on_success
+    expire_in: 90 days
+
+# ── Auto-tag on default branch (optional) ────────────────────────────────────
+# Uncomment to automatically create a semver patch tag on every push to the
+# default branch, which then triggers release_apk above.
+# Requires a CI_PUSH_TOKEN project variable with write_repository scope.
+#
+# auto_tag:
+#   stage: build
+#   image: alpine/git:latest
+#   rules:
+#     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_TAG == null'
+#   script:
+#     - git config user.email "ci@insighteditor.app"
+#     - git config user.name "CI Bot"
+#     - LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+#     - MAJOR=$(echo $LAST_TAG | cut -d. -f1 | tr -d 'v')
+#     - MINOR=$(echo $LAST_TAG | cut -d. -f2)
+#     - PATCH=$(echo $LAST_TAG | cut -d. -f3)
+#     - NEW_TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+#     - git tag "$NEW_TAG"
+#     - git push "https://oauth2:${CI_PUSH_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" "$NEW_TAG"

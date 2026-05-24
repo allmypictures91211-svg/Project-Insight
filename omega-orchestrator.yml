@@ -1,0 +1,143 @@
+version: "v1"
+
+environment: ambient
+
+components:
+
+  - name: "omega-orchestrator"
+    type: AgentComponent
+    prompt: "omega-master-control"
+    inputs:
+      - "context:goal"
+    toolset:
+      - "read_repository"
+      - "search_code"
+      - "read_file"
+      - "run_ci_pipeline"
+      - "read_ci_logs"
+    ui_log_events:
+      - "on_agent_final_answer"
+      - "on_tool_execution_success"
+      - "on_tool_execution_failed"
+
+  - name: "repository-intelligence-engine"
+    type: AgentComponent
+    prompt: "repository-intelligence"
+    inputs:
+      - "omega-orchestrator"
+    toolset:
+      - "read_repository"
+      - "search_code"
+      - "read_file"
+
+  - name: "framework-modernization-engine"
+    type: AgentComponent
+    prompt: "framework-modernization"
+    inputs:
+      - "repository-intelligence-engine"
+    toolset:
+      - "search_code"
+      - "read_file"
+      - "edit_file"
+      - "write_file"
+      - "create_commit"
+
+  - name: "dependency-reconstruction-engine"
+    type: AgentComponent
+    prompt: "dependency-reconstruction"
+    inputs:
+      - "framework-modernization-engine"
+    toolset:
+      - "search_code"
+      - "read_file"
+      - "edit_file"
+      - "write_file"
+      - "create_commit"
+
+  - name: "android-release-architect"
+    type: AgentComponent
+    prompt: "android-release-architect"
+    inputs:
+      - "dependency-reconstruction-engine"
+    toolset:
+      - "search_code"
+      - "read_file"
+      - "edit_file"
+      - "write_file"
+      - "create_commit"
+      - "run_ci_pipeline"
+      - "read_ci_logs"
+
+  - name: "security-hardening-engine"
+    type: AgentComponent
+    prompt: "security-hardening"
+    inputs:
+      - "android-release-architect"
+    toolset:
+      - "search_code"
+      - "read_file"
+      - "edit_file"
+      - "write_file"
+      - "create_commit"
+
+  - name: "performance-optimization-engine"
+    type: AgentComponent
+    prompt: "performance-optimization"
+    inputs:
+      - "security-hardening-engine"
+    toolset:
+      - "search_code"
+      - "read_file"
+      - "edit_file"
+      - "write_file"
+      - "create_commit"
+
+  - name: "autonomous-cicd-engine"
+    type: AgentComponent
+    prompt: "autonomous-cicd"
+    inputs:
+      - "performance-optimization-engine"
+    toolset:
+      - "search_code"
+      - "read_file"
+      - "edit_file"
+      - "write_file"
+      - "run_ci_pipeline"
+      - "read_ci_logs"
+      - "create_commit"
+
+  - name: "recursive-build-healing-engine"
+    type: AgentComponent
+    prompt: "recursive-build-healing"
+    inputs:
+      - "autonomous-cicd-engine"
+    toolset:
+      - "run_ci_pipeline"
+      - "read_ci_logs"
+      - "search_code"
+      - "read_file"
+      - "edit_file"
+      - "write_file"
+      - "create_commit"
+
+  - name: "production-validation-engine"
+    type: AgentComponent
+    prompt: "production-validation"
+    inputs:
+      - "recursive-build-healing-engine"
+    toolset:
+      - "run_ci_pipeline"
+      - "read_ci_logs"
+      - "read_repository"
+      - "search_code"
+
+  - name: "release-management-engine"
+    type: AgentComponent
+    prompt: "release-management"
+    inputs:
+      - "production-validation-engine"
+    toolset:
+      - "create_commit"
+      - "create_merge_request"
+      - "create_issue"
+      - "write_file"
